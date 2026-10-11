@@ -864,8 +864,8 @@ pub fn config() -> &'static Config {
     &CONFIG
 }
 
-/// Return the total system memory in bytes, respecting cgroup limits and
-/// `POLARS_OVERRIDE_TOTAL_MEMORY_MB`.
+/// Return the total system memory in bytes, respecting the cgroup limits of
+/// this process and `POLARS_OVERRIDE_TOTAL_MEMORY_MB`.
 pub fn total_memory() -> u64 {
     static TOTAL_MEMORY: LazyLock<u64> = LazyLock::new(|| {
         if let Ok(s) = std::env::var("POLARS_OVERRIDE_TOTAL_MEMORY_MB") {
@@ -879,7 +879,18 @@ pub fn total_memory() -> u64 {
 
         let mut sys = sysinfo::System::new();
         sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-        match sys.cgroup_limits() {
+        // The cgroup of this process can be nested, as in a SLURM job or a systemd unit.
+        // Its limits include the limits of all ancestor cgroups.
+        let process_limits = sysinfo::get_current_pid().ok().and_then(|pid| {
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            sys.process(pid)?.cgroup_limits()
+        });
+        // A container without its own cgroup namespace only finds its limits at the root cgroup.
+        match process_limits.or_else(|| sys.cgroup_limits()) {
             Some(limits) => limits.total_memory,
             None => sys.total_memory(),
         }
